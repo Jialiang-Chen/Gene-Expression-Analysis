@@ -14,10 +14,16 @@ library(wesanderson)
 library(openxlsx)
 library(pheatmap)
 library(RColorBrewer)
+library(survival)
+library(survminer)
+library(contsurvplot)
+library(pammtools)
 # library(pathviewr)
 
 citation("DESeq2")
 citation("clusterProfiler")
+citation("survival")
+citation("survminer")
 
 # set directory
 path <- "/Users/chenjialiang/Desktop/MSc AI for Medicine&Medical Research/ANAT40040-Bio Principles & Cellular Org/Assignment 2"
@@ -228,37 +234,6 @@ ggplot(gathered_deg_top10) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   scale_color_manual(values = c("#F8AFA8", "#74A089"))
 
-# heatmap 
-norm_deg <- normalized_counts |>
-  filter(Gene %in% deg$Gene, Gene != "") |> 
-  data.frame() |>
-  column_to_rownames(var = "Gene")
-
-deg_top10_heat <- deg_top10_norm |>
-  data.frame() |>
-  column_to_rownames(var = "Gene")
-
-
-heat.colors <- wes_palette("Royal2", 5)
-
-metadata_$PATIENT_ID <- gsub("-", "\\.", metadata_$PATIENT_ID)
-annotation <- metadata_ |>
-  #mutate_at(metadata_$PATIENT_ID, gsub("-", "\\.")) |>
-  data.frame(row.names = "PATIENT_ID")
-
-pheatmap(deg_top10_heat[, 1:10]
-         , color = heat.colors
-         , cluster_rows = TRUE
-         , show_rownames = TRUE
-         , border_color = NA
-         , font_size = 10
-         , scale = "row"
-         , fontsize_row = 10
-         , height = 20
-         , show_colnames = TRUE
-         , annotation = annotation
-         )
-
 
 # volcano plot
 res_shrunken_vol <- res_shrunken |>
@@ -359,11 +334,14 @@ cnetplot(down_paths, categorySize="pvalue", foldChange=entrez_down)
 #          species    = "hsa",
 #          limit      = list(gene=max(abs(gene)), cpd=1))
 
+
+
+# 5. principal component analysis
+
 # calculate the variance stabilised transformed expression values
 vsd <- vst(dds, blind = FALSE)
 colData(vsd)
 
-# principal component analysis
 pca <- plotPCA(vsd, intgroup = "Subtype", returnData = TRUE)
 ggplot(pca) +
   geom_point(aes(x = PC1, y = PC2, color = Subtype)) +
@@ -380,4 +358,174 @@ df <- mutate_at(df, c("PC3", "PC4"), as.numeric)
 ggplot(df, aes(x = PC3, y = PC4, color = Subtype)) + geom_point()
 
 
-deg.dist <- dist(deg, method = "euclidean")
+# 6. gene expression cluster
+
+a <- as.data.frame(head(deg))
+a <- column_to_rownames(a, var = "Gene")
+deg.dist1 <- dist(a, method = "euclidean")
+deg.dist1
+deg.clust1 <- hclust1(deg.dist)
+plot(deg.clust1)
+
+deg.dist2 <- 1-cor(t(a))
+deg.dist2
+deg.clust2 <- hclust(as.dist(deg.dist2))
+plot(deg.clust2)
+
+deg_top100 <- deg[1:100,]
+b <- data.frame(t(deg_top100[-1]))
+colnames(b) <- deg_top100$Gene
+b1 <- as.matrix(b)
+
+deg.cor <- cor(b1, method = "pearson")
+deg.hc <- hclust(as.dist(1-deg.cor), method = "complete")
+
+heat.colors <- brewer.pal(11,"RdBu")
+pheatmap(deg.cor, col = heat.colors, cluster_rows = TRUE, cluster_cols = TRUE, scale = "none", fontsize = 2)
+
+pheatmap(deg.cor
+         , color = heat.colors
+         , cluster_rows = TRUE
+         , show_rownames = TRUE
+         , border_color = NA
+         , font_size = 10
+         , scale = "row"
+         , fontsize_row = 10
+         , height = 20
+         , show_colnames = TRUE
+)
+
+
+
+# heatmap 
+norm_deg <- normalized_counts |>
+  filter(Gene %in% deg$Gene, Gene != "") |> 
+  data.frame() |>
+  column_to_rownames(var = "Gene")
+
+deg_top10_heat <- deg_top10_norm |>
+  data.frame() |>
+  select(-Gene) |>
+  as.matrix()
+
+rownames(deg_top10_heat) <- deg_top10_norm$Gene
+
+deg_top10_heat <- deg_top10_heat |>
+  t() |>
+  scale() |>
+  t()
+
+#heat.colors <- wes_palette("Royal2", 5)
+heat.colors <- brewer.pal(11,"RdBu")
+
+
+metadata_$PATIENT_ID <- gsub("-", "\\.", metadata_$PATIENT_ID)
+annotation <- metadata_ |>
+  #mutate_at(metadata_$PATIENT_ID, gsub("-", "\\.")) |>
+  data.frame(row.names = "PATIENT_ID")
+
+pheatmap(deg_top10_heat
+         , color = heat.colors
+         , cluster_rows = TRUE
+         , show_rownames = TRUE
+         , border_color = NA
+         , font_size = 10
+         , scale = "row"
+         , fontsize_row = 10
+         , height = 20
+         , show_colnames = TRUE
+         , annotation = annotation
+)
+
+# 7. survival analysis
+# prepare data
+vsd_deg <- vsd |>
+  assay() |>
+  data.frame() |>
+  rownames_to_column(var = "Gene") |>
+  filter(Gene %in% deg$Gene) |>
+  column_to_rownames(var = "Gene") |>
+  as.matrix()
+
+metadata_$PATIENT_ID <- gsub("\\.", "-", metadata_$PATIENT_ID)
+
+sur_data <- data_patient |>
+  mutate(OS_STATUS_ = as.numeric(substr(OS_STATUS,1,1))) |>
+  filter(PATIENT_ID %in% metadata_$PATIENT_ID) 
+
+sur_data <- merge(sur_data, metadata_, by = "PATIENT_ID")
+
+data_combined <- data.frame(t(vsd_deg), sur_data)
+data_combined$Subtype <- factor(data_combined$Subtype, levels = c("Others", "ERBB2 Amplified"))
+
+# check categorical data
+unique(data_combined$Subtype)
+class(data_combined$Subtype)
+
+# run cox regression
+cox_res <- coxph(Surv(OS_MONTHS, OS_STATUS_) ~ Subtype + KRT12 + PZP + BTN1A1 + NEUROD2 + MYOC + PNMT + VCX3A + LYPD4 + ZPBP2 + KRT1
+                   , data = data_combined, x = TRUE)
+cox_res
+summary(cox_res)
+
+# check statistics
+cox.zph(cox_res)
+
+# check data pattern overtime
+ggcoxzph(cox.zph(cox_res), point.size = 1)
+
+# hazard ratio
+ggforest(cox_res, data = data_combined)
+
+# survival curve by subtype
+cox_fit <- survfit(Surv(OS_MONTHS, OS_STATUS_) ~ Subtype, data = data_combined)
+cox_fit
+#plot(cox_fit)
+ggsurvplot(cox_fit, conf.int=TRUE, pval=TRUE, risk.table=TRUE, 
+           legend.title="Subtype",  
+           palette=c("dodgerblue2", "orchid2"), 
+           title="Breast Cancer Survival Curve ", 
+           subtitle = "ERBB2 Amplified vs Others",
+           risk.table.height=.3,
+           xlab = "Time (Month)")
+
+# survival curve by gene
+plot_surv_area(time = "OS_MONTHS"
+               , status = "OS_STATUS_"
+               , variable = "KRT12"
+               , data = data_combined
+               , model = cox_res
+               , title = "Brest Cancer Survival Curve - KRT12"
+               , xlab = "Time (Month)"
+               , start_color = "lightblue"
+               , end_color = "orchid2")
+
+plot_surv_area(time = "OS_MONTHS"
+               , status = "OS_STATUS_"
+               , variable = "ZPBP2"
+               , data = data_combined
+               , model = cox_res
+               , title = "Brest Cancer Survival Curve - ZPBP2"
+               , xlab = "Time (Month)"
+               , start_color = "lightblue"
+               , end_color = "orchid2")
+
+plot_surv_area(time = "OS_MONTHS"
+               , status = "OS_STATUS_"
+               , variable = "LYPD4"
+               , data = data_combined
+               , model = cox_res
+               , title = "Brest Cancer Survival Curve - LYPD4"
+               , xlab = "Time (Month)"
+               , start_color = "lightblue"
+               , end_color = "orchid2")
+
+plot_surv_area(time = "OS_MONTHS"
+               , status = "OS_STATUS_"
+               , variable = "VCX3A"
+               , data = data_combined
+               , model = cox_res
+               , title = "Brest Cancer Survival Curve - VCX3A"
+               , xlab = "Time (Month)"
+               , start_color = "lightblue"
+               , end_color = "orchid2")
